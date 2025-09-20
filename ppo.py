@@ -3,7 +3,7 @@ import numpy as np
 import torch as T
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions.categorical import Categorical
+from torch.distributions import Normal, Independent
 
 
 class PPOMemory:
@@ -65,22 +65,27 @@ class ActorNetwork(nn.Module):
         super(ActorNetwork, self).__init__()
 
         self.checkpoint_file = os.path.join(chkpt_dir, 'actor_torch_ppo')
-        self.actor = nn.Sequential(
+
+        self.body = nn.Sequential(
             nn.Linear(*input_dims, fc1_dims),
             nn.ReLU(),
             nn.Linear(fc1_dims, fc2_dims),
-            nn.ReLU(),
-            nn.Linear(fc2_dims, n_actions),
-            nn.Softmax(dim=-1)
+            nn.ReLU()
         )
+        self.mu_head = nn.Linear(fc2_dims, n_actions)
+        self.logstd_head = nn.Linear(fc2_dims, n_actions)
 
         self.optimizer = optim.Adam(self.parameters(), lr=alpha)
         self.device = T.device('cuda:0' if T.cuda.is_available() else 'cpu')
         self.to(self.device)
 
     def forward(self, state):
-        dist = self.actor(state)
-        dist = Categorical(dist)
+
+        x = self.body(state)
+        mu = self.mu_head(x)
+        log_std = self.logstd_head(x).clamp(-5, 2)
+        std = log_std.exp()
+        dist = Independent(Normal(mu, std), 1)
 
         return dist
 
@@ -166,25 +171,27 @@ class Agent:
         self.critic.load_checkpoint()
 
     def choose_action(self, observation):
-        state = T.tensor([observation], dtype=T.float).to(self.actor.device)
+        state = T.tensor(observation, dtype=T.float32, device=self.actor.device)
 
         dist = self.actor(state)
         value = self.critic(state)
+
         action = dist.sample()
+        logp = dist.log_prob(action)
 
-        probs = T.squeeze(dist.log_prob(action)).item()
-        action = T.squeeze(action).item()
-        value = T.squeeze(value).item()
+        action = action.squeeze(0).detach().cpu().numpy()
+        logp = logp.squeeze(0).item()
+        value = value.squeeze(-1).squeeze(0).item()
 
-        return action, probs, value
+        return action, logp, value
 
     def learn(self):
 
         for _ in range(self.n_epochs):
             state_arr, action_arr, old_prob_arr, vals_arr, reward_arr, dones_arr, batches = self.memory.generate_batches()
 
-            values = vals_arr
-            advantage = np.zeros(len(reward_arr), dtype=np.float32)
+            values = T.tensor(vals_arr, dtype=T.float32, device=self.actor.device)
+            advantages = np.zeros(len(reward_arr), dtype=np.float32)
 
             for t in range(len(reward_arr) - 1):
                 discount = 1
@@ -192,29 +199,28 @@ class Agent:
                 for k in range(t, len(reward_arr)-1):
                     a_t += discount*(reward_arr[k] + self.gamma*values[k+1]*(1 - int(dones_arr[k])) - values[k])
                     discount *= self.gamma*self.gae_lambda
-                advantage[t] = a_t
-            advantage = T.tensor(advantage).to(self.actor.device)
+                advantages[t] = a_t
+            advantages = T.tensor(advantages, dtype=T.float32, device=self.actor.device)
 
-            values = T.tensor(values).to(self.actor.device)
+            values = values.detach().clone().requires_grad_(True).to(self.actor.device)
             for batch in batches:
-                states = T.tensor(state_arr[batch], dtype=T.float).to(self.actor.device)
-                old_probs = T.tensor(old_prob_arr[batch]).to(self.actor.device)
-                actions = T.tensor(action_arr[batch]).to(self.actor.device)
+                states = T.tensor(state_arr[batch], dtype=T.float32).to(self.actor.device)
+                old_logp = T.tensor(old_prob_arr[batch], dtype=T.float32).to(self.actor.device)
+                actions = T.tensor(action_arr[batch], dtype=T.float32).to(self.actor.device)
 
                 dist = self.actor(states)
-                critic_value = self.critic(states)
+                critic_value = self.critic(states).squeeze(-1)
 
                 critic_value = T.squeeze(critic_value)
 
-                new_probs = dist.log_prob(actions)
-                prob_ratio = new_probs.exp() / old_probs.exp()
-                weighted_probs = advantage[batch] * prob_ratio
-                weighted_clipped_probs = T.clamp(prob_ratio, 1-self.policy_clip, 1+self.policy_clip) * advantage[batch]
-                actor_loss = -T.min(weighted_probs, weighted_clipped_probs).mean()
+                new_logp = dist.log_prob(actions)
+                ratio= T.exp(new_logp - old_logp)
+                surr1 = ratio * advantages[batch]
+                surr2 = T.clamp(ratio, 1.0 - self.policy_clip, 1.0 + self.policy_clip) * advantages[batch]
+                actor_loss = -T.min(surr1, surr2).mean()
 
-                returns = advantage[batch] + values[batch]
-                critic_loss = (returns-critic_value)**2
-                critic_loss = critic_loss.mean()
+                returns = advantages[batch] + values[batch]
+                critic_loss = (returns - critic_value).pow(2).mean()
 
                 total_loss = actor_loss + 0.5*critic_loss
                 self.actor.optimizer.zero_grad()

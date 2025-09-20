@@ -1,18 +1,34 @@
+from datetime import datetime
 import gym
+from gym.envs.registration import register
 import numpy as np
 from ppo import Agent
 from utils import plot_learning_curve
+from simglucose.simulation.scenario import CustomScenario
+
+start_time = datetime(2018, 1, 1, 0, 0, 0)
+meal_scenario = CustomScenario(start_time=start_time, scenario=[(1, 20)])
+
+register(
+    id='simglucose-adolescent2-v0',
+    entry_point='simglucose.envs:T1DSimEnv',
+    kwargs={
+        'patient_name': 'adolescent#002',
+        'custom_scenario': meal_scenario
+    }
+)
 
 
 if __name__ == '__main__':
 
-    env = gym.make('CartPole-v0')
+    env = gym.make('simglucose-adolescent2-v0')
     N = 20
     batch_size = 5
     n_epochs = 4
     alpha = 0.0003
+
     agent = Agent(
-        n_actions=env.action_space.n,
+        n_actions=1,
         batch_size=batch_size,
         alpha=alpha,
         n_epochs=n_epochs,
