@@ -4,16 +4,33 @@ from gym.envs.registration import register
 import numpy as np
 from ppo import Agent
 from utils import plot_learning_curve
-from simglucose.simulation.scenario import CustomScenario
+from simglucose.simulation.scenario_gen import RandomScenario
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter()  # Tensorboard
+
 
 start_time = datetime(2018, 1, 1, 0, 0, 0)
-meal_scenario = CustomScenario(start_time=start_time, scenario=[(1, 20)])
+meal_scenario = RandomScenario(start_time=start_time, seed=1)
+
+# Testing every patients
+'''
+patient_names = [
+    'adolescent#001','adolescent#002','adolescent#003','adolescent#004','adolescent#005',
+    'adolescent#006','adolescent#007','adolescent#008','adolescent#009','adolescent#010',
+    'adult#001','adult#002','adult#003','adult#004','adult#005',
+    'adult#006','adult#007','adult#008','adult#009','adult#010',
+    'child#001','child#002','child#003','child#004','child#005',
+    'child#006','child#007','child#008','child#009','child#010',
+]
+'''
+# Testing one patients
+patient_names = 'adult#001'
 
 register(
     id='simglucose-adolescent2-v0',
     entry_point='simglucose.envs:T1DSimEnv',
     kwargs={
-        'patient_name': 'adolescent#002',
+        'patient_name': patient_names,
         'custom_scenario': meal_scenario
     }
 )
